@@ -7,7 +7,7 @@ SRCS = main.c
 
 OBJS = $(SRCS:.c=.o)
 
-CFLAGS = -Wall -Werror -pthread
+CFLAGS = -Wall -Werror -pthread -Wno-unused-result
 
 .PHONY: all clean
 
