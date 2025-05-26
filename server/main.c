@@ -12,11 +12,16 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <time.h>
+#include <pthread.h>
 
 #define PORT 9000
 #define BACKLOG 10
+#define FILENAME "/var/tmp/aesdsocketdata"
+
 int sockfd=-1, client_fd=-1;
 FILE *client_stream=NULL, *aesd_outfile=NULL;
+pthread_mutex_t file_mutex;
 
 void cleanup(bool all) {
     if (client_stream != NULL) {
@@ -40,8 +45,32 @@ void cleanup(bool all) {
             sockfd = -1;
         }
 
-        remove("/var/tmp/aesdsocketdata");
+        remove(FILENAME);
         closelog(); 
+    }
+}
+
+void* timer_thread_func(void* arg){
+    while(1){
+        sleep(10);
+        time_t now = time(NULL);
+        struct tm* timeinfo = localtime(&now);
+        if (timeinfo == NULL) {
+            cleanup(true);            
+        }
+
+        char timestamp_str[128];
+        strftime(timestamp_str, sizeof(timestamp_str), "timestamp: %a, %d %b %Y %T %z\n", timeinfo);
+
+        pthread_mutex_lock(&file_mutex);
+        aesd_outfile = fopen(FILENAME, "a+");
+        if (aesd_outfile == NULL) {
+            syslog(LOG_ERR, "Could not make aesd outfile stream: %s", strerror(errno));
+            cleanup(true);
+        }
+        fprintf(aesd_outfile, "%s", timestamp_str);
+        cleanup(false);
+        pthread_mutex_unlock(&file_mutex);
     }
 }
 
@@ -49,6 +78,7 @@ void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
         syslog(LOG_INFO, "Caught signal, exiting");
         cleanup(true);
+        exit(0);
     }
 }
 
@@ -108,6 +138,13 @@ int main(int argc, char *argv[]) {
         daemonize(); 
     }
 
+    pthread_t timer_thread;
+
+    if (pthread_create(&timer_thread, NULL, timer_thread_func, NULL) != 0) {
+        cleanup(true);
+        return 1;
+    }
+
     struct sockaddr_in server_addr, client_addr;
     socklen_t addr_size = sizeof(client_addr);
 
@@ -162,7 +199,8 @@ int main(int argc, char *argv[]) {
             return -1;
         }
 
-        aesd_outfile = fopen("/var/tmp/aesdsocketdata", "a+");
+        pthread_mutex_lock(&file_mutex);
+        aesd_outfile = fopen(FILENAME, "a+");
         if (aesd_outfile == NULL) {
             syslog(LOG_ERR, "Could not make aesd outfile stream: %s", strerror(errno));
             cleanup(true);
@@ -187,6 +225,8 @@ int main(int argc, char *argv[]) {
         syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(client_addr.sin_addr));
         free(line);
         cleanup(false);
+        pthread_mutex_unlock(&file_mutex);
+
     }
 
     cleanup(true);
