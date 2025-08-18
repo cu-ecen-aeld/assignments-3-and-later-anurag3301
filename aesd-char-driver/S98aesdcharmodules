@@ -1,0 +1,28 @@
+#!/bin/sh
+
+case "$1" in
+    start)
+        echo "AESD: Loading aesdchar module"
+         /etc/aesdchar/aesdchar_load /etc/aesdchar
+
+        ;;
+    stop)
+        echo "AESD: Unloading aesdchar module"
+        /etc/aesdchar/aesdchar_unload
+        ;;
+    restart)
+        echo "Restarting AESD"
+        $0 stop
+        sleep 1
+        $0 start
+        ;;
+    status)
+        cat /proc/devices | grep aesdchar
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0
