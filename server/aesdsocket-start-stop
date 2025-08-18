@@ -7,7 +7,7 @@ PIDFILE="/tmp/${NAME}.pid"
 case "$1" in
     start)
         echo "Starting $NAME..."
-        start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" --exec aesdsocket
+        start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" --exec /usr/bin/aesdsocket
         ;;
     stop)
         echo "Stopping $NAME..."
