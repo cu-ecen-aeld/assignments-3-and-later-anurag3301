@@ -9,6 +9,10 @@ OBJS = $(SRCS:.c=.o)
 
 CFLAGS = -Wall -Werror -pthread -Wno-unused-result $(LDFLAGS)
 
+ifeq ($(origin USE_AESD_CHAR_DEVICE), command line)
+    CFLAGS += -DUSE_AESD_CHAR_DEVICE=$(USE_AESD_CHAR_DEVICE)
+endif
+
 .PHONY: all clean
 
 all: $(TARGET)

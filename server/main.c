@@ -17,7 +17,11 @@
 
 #define PORT 9000
 #define BACKLOG 10
+#if USE_AESD_CHAR_DEVICE
+#define FILENAME "/dev/aesdchar"
+#else
 #define FILENAME "/var/tmp/aesdsocketdata"
+#endif
 
 int sockfd=-1, client_fd=-1;
 FILE *client_stream=NULL, *aesd_outfile=NULL;
@@ -138,12 +142,14 @@ int main(int argc, char *argv[]) {
         daemonize(); 
     }
 
+#if !USE_AESD_CHAR_DEVICE
     pthread_t timer_thread;
 
     if (pthread_create(&timer_thread, NULL, timer_thread_func, NULL) != 0) {
         cleanup(true);
         return 1;
     }
+#endif
 
     struct sockaddr_in server_addr, client_addr;
     socklen_t addr_size = sizeof(client_addr);
