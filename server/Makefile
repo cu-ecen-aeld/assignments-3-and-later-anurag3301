@@ -7,11 +7,8 @@ SRCS = main.c
 
 OBJS = $(SRCS:.c=.o)
 
-CFLAGS = -Wall -Werror -pthread -Wno-unused-result $(LDFLAGS)
-
-ifeq ($(origin USE_AESD_CHAR_DEVICE), command line)
-    CFLAGS += -DUSE_AESD_CHAR_DEVICE=$(USE_AESD_CHAR_DEVICE)
-endif
+USE_AESD_CHAR_DEVICE ?= 1
+CFLAGS = -Wall -Werror -pthread -Wno-unused-result $(LDFLAGS) -DUSE_AESD_CHAR_DEVICE=$(USE_AESD_CHAR_DEVICE)
 
 .PHONY: all clean
 
