@@ -133,20 +133,30 @@ static int handle_ioctl_command(int fd, const char *buffer)
 
 /**
  * Read all content from the aesdchar device and send over socket
- * @param client_stream: client socket stream
- * @param aesd_file: aesdchar device file stream
+ * @param client_stream: client socket stream  
+ * @param aesd_fd: aesdchar device file descriptor
  * @return 0 on success, -1 on error
  */
-static int read_and_send_device_content(FILE *client_stream, FILE *aesd_file)
+static int read_and_send_device_content(FILE *client_stream, int aesd_fd)
 {
     char buffer[1024];
+    ssize_t bytes_read;
     
-    // Read from current file position and send over socket
-    while (fgets(buffer, sizeof(buffer), aesd_file) != NULL) {
-        fputs(buffer, client_stream);
+    // Read from current file position (set by ioctl) and send over socket
+    while ((bytes_read = read(aesd_fd, buffer, sizeof(buffer))) > 0) {
+        // Send the data over socket
+        if (fwrite(buffer, 1, bytes_read, client_stream) != bytes_read) {
+            syslog(LOG_ERR, "Failed to send data to client");
+            return -1;
+        }
     }
-    fflush(client_stream);
     
+    if (bytes_read < 0) {
+        syslog(LOG_ERR, "Failed to read from device: %s", strerror(errno));
+        return -1;
+    }
+    
+    fflush(client_stream);
     return 0;
 }
 
@@ -316,18 +326,22 @@ int main(int argc, char *argv[]) {
                 // Handle IOCTL command - don't write to device
                 if (handle_ioctl_command(aesd_fd, line) == 0) {
                     // IOCTL successful, read from current position and send back
-                    read_and_send_device_content(client_stream, aesd_outfile);
+                    read_and_send_device_content(client_stream, aesd_fd);
                 } else {
                     syslog(LOG_ERR, "IOCTL command failed");
                 }
             } else {
-                // Normal write command
-                fprintf(aesd_outfile, "%s", line);
-                fflush(aesd_outfile);
+                // Normal write command - write to device using file descriptor
+                ssize_t written = write(aesd_fd, line, nread);
+                if (written < 0) {
+                    syslog(LOG_ERR, "Write to device failed: %s", strerror(errno));
+                } else if (written != nread) {
+                    syslog(LOG_WARNING, "Partial write to device: %zd/%zd bytes", written, nread);
+                }
                 
                 // Reset to beginning and send all content
-                fseek(aesd_outfile, 0, SEEK_SET);
-                read_and_send_device_content(client_stream, aesd_outfile);
+                lseek(aesd_fd, 0, SEEK_SET);
+                read_and_send_device_content(client_stream, aesd_fd);
             }
 #else
             // Non-char device behavior (original)
