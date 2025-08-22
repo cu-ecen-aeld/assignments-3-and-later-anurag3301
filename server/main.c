@@ -14,6 +14,8 @@
 #include <fcntl.h>
 #include <time.h>
 #include <pthread.h>
+#include <sys/ioctl.h>
+#include "aesd_ioctl.h"
 
 #define PORT 9000
 #define BACKLOG 10
@@ -49,7 +51,9 @@ void cleanup(bool all) {
             sockfd = -1;
         }
 
+#if !USE_AESD_CHAR_DEVICE
         remove(FILENAME);
+#endif
         closelog(); 
     }
 }
@@ -76,6 +80,74 @@ void* timer_thread_func(void* arg){
         cleanup(false);
         pthread_mutex_unlock(&file_mutex);
     }
+}
+
+/**
+ * Check if the received string is an IOCTL command
+ * @param buffer: the received string buffer
+ * @return true if it's an IOCTL command, false otherwise
+ */
+static bool is_ioctl_command(const char *buffer)
+{
+    return strncmp(buffer, "AESDCHAR_IOCSEEKTO:", 19) == 0;
+}
+
+/**
+ * Parse IOCTL command and perform seek operation
+ * @param fd: file descriptor to the aesdchar device
+ * @param buffer: the received command string
+ * @return 0 on success, -1 on error
+ */
+static int handle_ioctl_command(int fd, const char *buffer)
+{
+    struct aesd_seekto seekto;
+    char *endptr;
+    const char *cmd_start = buffer + 19; // Skip "AESDCHAR_IOCSEEKTO:"
+    
+    // Parse X value (write command)
+    seekto.write_cmd = strtoul(cmd_start, &endptr, 10);
+    if (endptr == cmd_start || *endptr != ',') {
+        syslog(LOG_ERR, "Invalid IOCTL command format: missing or invalid X value");
+        return -1;
+    }
+    
+    // Parse Y value (write command offset)
+    cmd_start = endptr + 1; // Skip comma
+    seekto.write_cmd_offset = strtoul(cmd_start, &endptr, 10);
+    if (endptr == cmd_start) {
+        syslog(LOG_ERR, "Invalid IOCTL command format: missing or invalid Y value");
+        return -1;
+    }
+    
+    syslog(LOG_DEBUG, "Performing IOCTL seek: write_cmd=%u, write_cmd_offset=%u", 
+           seekto.write_cmd, seekto.write_cmd_offset);
+    
+    // Perform the ioctl
+    if (ioctl(fd, AESDCHAR_IOCSEEKTO, &seekto) < 0) {
+        syslog(LOG_ERR, "IOCTL failed: %s", strerror(errno));
+        return -1;
+    }
+    
+    return 0;
+}
+
+/**
+ * Read all content from the aesdchar device and send over socket
+ * @param client_stream: client socket stream
+ * @param aesd_file: aesdchar device file stream
+ * @return 0 on success, -1 on error
+ */
+static int read_and_send_device_content(FILE *client_stream, FILE *aesd_file)
+{
+    char buffer[1024];
+    
+    // Read from current file position and send over socket
+    while (fgets(buffer, sizeof(buffer), aesd_file) != NULL) {
+        fputs(buffer, client_stream);
+    }
+    fflush(client_stream);
+    
+    return 0;
 }
 
 void signal_handler(int signum) {
@@ -206,36 +278,77 @@ int main(int argc, char *argv[]) {
         }
 
         pthread_mutex_lock(&file_mutex);
+
+#if USE_AESD_CHAR_DEVICE
+        // For char device, open with file descriptor for ioctl support
+        int aesd_fd = open(FILENAME, O_RDWR);
+        if (aesd_fd < 0) {
+            syslog(LOG_ERR, "Could not open aesdchar device: %s", strerror(errno));
+            cleanup(true);
+            return -1;
+        }
+        
+        // Create FILE* from fd for existing fgets/fputs operations
+        aesd_outfile = fdopen(aesd_fd, "w+");
+        if (aesd_outfile == NULL) {
+            syslog(LOG_ERR, "Could not make aesd outfile stream: %s", strerror(errno));
+            close(aesd_fd);
+            cleanup(true);
+            return -1;
+        }
+#else
         aesd_outfile = fopen(FILENAME, "a+");
         if (aesd_outfile == NULL) {
             syslog(LOG_ERR, "Could not make aesd outfile stream: %s", strerror(errno));
             cleanup(true);
             return -1;
         }
+#endif
 
-        
         char *line = NULL;
         size_t len = 0;
-        getline(&line, &len, client_stream);
-        fprintf(aesd_outfile, "%s", line);
-        fflush(aesd_outfile);
+        ssize_t nread = getline(&line, &len, client_stream);
+        
+        if (nread > 0) {
+#if USE_AESD_CHAR_DEVICE
+            // Check if this is an IOCTL command
+            if (is_ioctl_command(line)) {
+                // Handle IOCTL command - don't write to device
+                if (handle_ioctl_command(aesd_fd, line) == 0) {
+                    // IOCTL successful, read from current position and send back
+                    read_and_send_device_content(client_stream, aesd_outfile);
+                } else {
+                    syslog(LOG_ERR, "IOCTL command failed");
+                }
+            } else {
+                // Normal write command
+                fprintf(aesd_outfile, "%s", line);
+                fflush(aesd_outfile);
+                
+                // Reset to beginning and send all content
+                fseek(aesd_outfile, 0, SEEK_SET);
+                read_and_send_device_content(client_stream, aesd_outfile);
+            }
+#else
+            // Non-char device behavior (original)
+            fprintf(aesd_outfile, "%s", line);
+            fflush(aesd_outfile);
 
-        fseek(aesd_outfile, 0, SEEK_SET);
-
-        char buffer[1024];
-        while (fgets(buffer, sizeof(buffer), aesd_outfile) != NULL) {
-            fputs(buffer, client_stream);
+            fseek(aesd_outfile, 0, SEEK_SET);
+            char buffer[1024];
+            while (fgets(buffer, sizeof(buffer), aesd_outfile) != NULL) {
+                fputs(buffer, client_stream);
+            }
+            fflush(client_stream);
+#endif
         }
-        fflush(client_stream);
 
         syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(client_addr.sin_addr));
         free(line);
         cleanup(false);
         pthread_mutex_unlock(&file_mutex);
-
     }
 
     cleanup(true);
-
     return 0;
 }
