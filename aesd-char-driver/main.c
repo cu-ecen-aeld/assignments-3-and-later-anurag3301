@@ -18,6 +18,7 @@
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -199,12 +200,105 @@ out_unlock:
     return retval;
 }
 
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+    struct aesd_dev *dev = filp->private_data;
+    struct aesd_seekto seekto;
+    long retval = 0;
+    uint8_t index;
+    struct aesd_buffer_entry *entry;
+    size_t char_offset = 0;
+    size_t current_offset = 0;
+
+    PDEBUG("ioctl cmd=%u", cmd);
+
+    if (!dev)
+        return -EFAULT;
+
+    // Check if this is our command
+    if (_IOC_TYPE(cmd) != AESD_IOC_MAGIC)
+        return -ENOTTY;
+    if (_IOC_NR(cmd) > AESDCHAR_IOC_MAXNR)
+        return -ENOTTY;
+
+    switch (cmd) {
+    case AESDCHAR_IOCSEEKTO:
+        if (copy_from_user(&seekto, (void __user *)arg, sizeof(seekto))) {
+            retval = -EFAULT;
+            break;
+        }
+
+        if (mutex_lock_interruptible(&dev->lock)) {
+            retval = -ERESTARTSYS;
+            break;
+        }
+
+        // Validate write_cmd is within bounds
+        if (seekto.write_cmd >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED) {
+            retval = -EINVAL;
+            goto unlock;
+        }
+
+        // Calculate the absolute character offset
+        // First, find the entry corresponding to write_cmd
+        index = 0;
+        AESD_CIRCULAR_BUFFER_FOREACH(entry, &dev->circbuf, index) {
+            if (index == seekto.write_cmd) {
+                // Check if this entry exists and has data
+                if (!entry->buffptr || entry->size == 0) {
+                    retval = -EINVAL;
+                    goto unlock;
+                }
+                
+                // Check if write_cmd_offset is within this entry
+                if (seekto.write_cmd_offset >= entry->size) {
+                    retval = -EINVAL;
+                    goto unlock;
+                }
+                
+                // Calculate absolute offset
+                char_offset = current_offset + seekto.write_cmd_offset;
+                break;
+            }
+            
+            // Only count entries that have data
+            if (entry->buffptr && entry->size > 0) {
+                current_offset += entry->size;
+            }
+        }
+
+        // If we didn't find the entry, it's invalid
+        if (index >= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED) {
+            retval = -EINVAL;
+            goto unlock;
+        }
+
+        // Set the file position
+        filp->f_pos = char_offset;
+        
+        PDEBUG("ioctl seek to write_cmd=%u, write_cmd_offset=%u, f_pos=%lld",
+               seekto.write_cmd, seekto.write_cmd_offset, filp->f_pos);
+
+unlock:
+        mutex_unlock(&dev->lock);
+        break;
+
+    default:
+        retval = -ENOTTY;
+        break;
+    }
+
+    return retval;
+}
+
+
 struct file_operations aesd_fops = {
-    .owner   = THIS_MODULE,
-    .read    = aesd_read,
-    .write   = aesd_write,
-    .open    = aesd_open,
-    .release = aesd_release,
+    .owner          = THIS_MODULE,
+    .read           = aesd_read,
+    .write          = aesd_write,
+    .open           = aesd_open,
+    .release        = aesd_release,
+    .unlocked_ioctl = aesd_ioctl,  // Add this line
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
